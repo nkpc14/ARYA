@@ -1,10 +1,13 @@
+
 # -*- coding: utf-8 -*-
 """
 Created on Fri Aug 31 14:18:25 2018
 
 @author: Nitish Kumar
 """
-from __future__ import division
+import os
+import re
+import sys
 from subprocess import Popen
 from pywinauto import Desktop
 from pywinauto import Application
@@ -15,13 +18,10 @@ from pywinauto.keyboard import SendKeys, KeySequenceError
 import speech_recognition as sr
 import pyttsx3
 #import AryaSpeechModule
-import argparse
+
 from pywinauto import Application
 
 
-
-import re
-import sys
 
 from google.cloud import speech
 from google.cloud.speech import enums
@@ -29,37 +29,135 @@ from google.cloud.speech import types
 import pyaudio
 from six.moves import queue
 
-import AryaMicToAudio
-import AryaAudToRecognise
+# Audio recording parameters
+RATE = 16000
+CHUNK = int(RATE / 10)  # 100ms
+def explicit():
+    from google.cloud import storage
+
+    # Explicitly use service account credentials by specifying the private key
+    # file.
+    storage_client = storage.Client.from_service_account_json(
+        'a1.json')
+
+    # Make an authenticated API request
+    buckets = list(storage_client.list_buckets())
+    print(buckets)
+
+class MicrophoneStream(object):
+    def __init__(self, rate, chunk):
+        self._rate = rate
+        self._chunk = chunk
+
+        # Create a thread-safe buffer of audio data
+        self._buff = queue.Queue()
+        self.closed = True
+
+    def __enter__(self):
+        self._audio_interface = pyaudio.PyAudio()
+        self._audio_stream = self._audio_interface.open(
+            format=pyaudio.paInt16,
+            channels=1, rate=self._rate,
+            input=True, frames_per_buffer=self._chunk,
+            stream_callback=self._fill_buffer,
+        )
+
+        self.closed = False
+
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self._audio_stream.stop_stream()
+        self._audio_stream.close()
+        self.closed = True
+        self._buff.put(None)
+        self._audio_interface.terminate()
+
+    def _fill_buffer(self, in_data, frame_count, time_info, status_flags):
+        """Continuously collect data from the audio stream, into the buffer."""
+        self._buff.put(in_data)
+        return None, pyaudio.paContinue
+
+    def generator(self):
+        while not self.closed:
+
+            chunk = self._buff.get()
+            if chunk is None:
+                return
+            data = [chunk]
+
+            while True:
+                try:
+                    chunk = self._buff.get(block=False)
+                    if chunk is None:
+                        return
+                    data.append(chunk)
+                except queue.Empty:
+                    break
+
+            yield b''.join(data)
+
+voiceModelData = ""
+def listen_print_loop(responses):
+    global voiceModelData
+    num_chars_printed = 0
+    for response in responses:
+        if not response.results:
+            continue
+        result = response.results[0]
+        if not result.alternatives:
+            continue
+
+        # Display the transcription of the top alternative.
+        transcript = result.alternatives[0].transcript
+        overwrite_chars = ' ' * (num_chars_printed - len(transcript))
+
+        if not result.is_final:
+            voiceModelData = transcript + overwrite_chars + '\r'
+            sys.stdout.write(transcript + overwrite_chars + '\r')
+            sys.stdout.flush()
+            
+            commandsList = [
+                    'start sublime',
+                    ]
+            
+            if voiceModelData in commandsList:
+                break
+            
+            
+            num_chars_printed = len(transcript)
+            
+        else:
+            if re.search(r'\b(exit|quit)\b', transcript, re.I):
+                print('Exiting..')
+                break
+
+            num_chars_printed = 0
 
 
+def main():
+    language_code = 'en-IN' 
 
-def convertToText():
-        
-    # Instantiates a client
     client = speech.SpeechClient()
-    
-    # The name of the audio file to transcribe
-    file_name ='demo.wav'
-    
-    # Loads the audio into memory
-    with io.open(file_name, 'rb') as audio_file:
-        content = audio_file.read()
-        audio = types.RecognitionAudio(content=content)
-    
     config = types.RecognitionConfig(
         encoding=enums.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=44100,
-        language_code='en-US')
-    
-    # Detects speech in the audio file
-    response = client.recognize(config, audio)
-    
-    for result in response.results:
-        global voiceData
-        voiceData = result.alternatives[0].transcript
-        print('Transcript: {}'.format(result.alternatives[0].transcript))
-    return voiceData
+        sample_rate_hertz=RATE,
+        language_code=language_code)
+    streaming_config = types.StreamingRecognitionConfig(
+        config=config,
+        interim_results=True,
+        )
+
+    with MicrophoneStream(RATE, CHUNK) as stream:
+        audio_generator = stream.generator()
+        requests = (types.StreamingRecognizeRequest(audio_content=content)
+                    for content in audio_generator)
+
+        responses = client.streaming_recognize(streaming_config, requests)
+        
+        listen_print_loop(responses)
+
+
 
 
 
@@ -82,6 +180,7 @@ class AryaAI:
         
     def show():
 
+        
         # Open "Control Panel"
         Application().start('control.exe')
         app = Application(backend='uia').connect(path='explorer.exe', title='Control Panel')
@@ -111,8 +210,35 @@ class AryaAI:
         
     
     def aryaSTT(self):
-        AryaMicToAudio.main()
-        self.voiceModel = AryaAudToRecognise.convertToText()
+        """
+        # obtain audio from the microphone
+        main()
+        self.voiceModel = AryaSpeechModule.voiceModelData
+        print("Arya : " + self.voiceModel)
+        """
+        r = sr.Recognizer()
+        with sr.Microphone() as source:
+            print("Say something!")
+            audio = r.listen(source)
+        # recognize speech using ARYA Speech Recognition
+        GOOGLE_CLOUD_SPEECH_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        try:
+            print("Google Cloud Speech recognition for \"numero\" with different sets of preferred phrases:")
+            print(r.recognize_google_cloud(audio, credentials_json=GOOGLE_CLOUD_SPEECH_CREDENTIALS, preferred_phrases=["noomarow"]))
+            print(r.recognize_google_cloud(audio, credentials_json=GOOGLE_CLOUD_SPEECH_CREDENTIALS, preferred_phrases=["newmarrow"]))
+        except sr.UnknownValueError:
+            print("Google Cloud Speech could not understand audio")
+        except sr.RequestError as e:
+            print("Could not request results from Google Cloud Speech service; {0}".format(e))
+            
+            
+        try:
+            self.voiceModel = r.recognize_google(audio)
+            print("ARYA thinks you said " + self.voiceModel )
+        except sr.UnknownValueError:
+            print("ARYA  could not understand audio")
+        except sr.RequestError as e:
+            print("Could not request results from ARYA service; {0}".format(e))
         self.voiceModel = self.voiceModel.lower()
         
     def startSublime(self):  
@@ -175,7 +301,7 @@ class AryaAI:
         if(param == "sublime"):
             self.pxwindowclass.type_keys(message, with_spaces = True)
         elif(param =="notepad"):
-            self.notepad.type_keys(message, with_spaces = True)
+            self.notepad.type_keys("Hello welcome to ARYA!", with_spaces = True)
         else:
             pass
     
@@ -300,12 +426,7 @@ class AryaAI:
         self.dlg.close()
     
     def calDemo(self):
-        app = Application(backend="uia").start('calc.exe')
-        dlg = Desktop(backend="uia").Calculator
-        dlg.type_keys('2*3=')
-        dlg.print_control_identifiers()
-        dlg.minimize()
-        Desktop(backend="uia").window(title='Calculator', visible_only=False).restore()
+        pass
     
     def startCal(self):
         self.app = self.Application(backend="uia").start('calc.exe')
@@ -317,44 +438,7 @@ class AryaAI:
         self.app = Application().connect(title_re=".*Notepad", class_name="Notepad")
         self.menu_item = self.notepad.MenuItem(u'&File')
         self.menu_item.ClickInput()
-        
-    def msPaintDemo(self):
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--log", help = "enable logging", type=str, required = False)
-        args = parser.parse_args()
-        actionlogger.enable()
-        logger = logging.getLogger('pywinauto')
-        if args.log:
-            logger.handlers[0] = logging.FileHandler(args.log)
-        
-        app = Application(backend='uia').start(r'mspaint.exe')
-        dlg = app.window(title_re='.* - Paint')
-        # File->Open menu selection
-        dlg.File_tab.click()
-        dlg.child_window(title='Open', control_type='MenuItem', found_index=0).invoke()
-        
-        # handle Open dialog
-        file_name_edit = dlg.Open.child_window(title="File name:", control_type="Edit")
-        file_name_edit.set_text('image.jpg')
-        dlg.Open.child_window(title="Open", auto_id="1", control_type="Button").click()
-        dlg.ResizeButton.click()
-        dlg.ResizeAndSkew.Pixels.select()
-        if dlg.ResizeAndSkew.Maintain_aspect_ratio.get_toggle_state() != 1:
-            dlg.ResizeAndSkew.Maintain_aspect_ratio.toggle()
-        dlg.ResizeAndSkew.HorizontalEdit1.set_text('100')
-        dlg.ResizeAndSkew.OK.click()
-        # Select menu "File->Save as->PNG picture"
-        dlg.File_tab.click()
-        dlg.SaveAsGroup.child_window(title="Save as", found_index=1).invoke()
-        dlg.child_window(title='PNG picture', found_index=0).invoke()
-        # Type output file name and save
-        dlg.SaveAs.File_name_ComboBox.Edit.set_text('image.png')
-        dlg.SaveAs.Save.click()
-        if dlg.ConfirmSaveAs.exists():
-            dlg.ConfirmSaveAs.Yes.click()
-        # Close application
-        dlg.close()
-    
+
 def startARYA():
     Arya = AryaAI()
     
@@ -456,10 +540,6 @@ def startARYA():
                     pass #invalid command
         elif Arya.voiceModel == "show Updates":
             Arya.show()
-        elif Arya.voiceModel == "calculator demo":
-            Arya.calDemo()
-        elif Arya.voiceModel == "paint demo":
-            Arya.msPaintDemo()
         else:
             break
-#startARYA()
+startARYA()
